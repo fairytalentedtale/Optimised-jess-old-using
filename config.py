@@ -6,7 +6,7 @@ TOKEN = os.getenv("DISCORD_TOKEN")
 MONGODB_URI = os.getenv("MONGODB_URI")
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")  # Optional: for private model repos
 BOT_PREFIX = ['p!', 'P!']
-POKETWO_USER_ID = 1487501946599243938
+POKETWO_USER_ID = 716390085896962058
 
 # Embed Configuration
 EMBED_COLOR = 0xf4e5ba
