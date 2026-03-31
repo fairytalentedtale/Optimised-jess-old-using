@@ -128,6 +128,7 @@ async def on_ready():
     # Load cogs
     cogs_to_load = [
         'cogs.collection',
+        'cogs.type_region',
         'cogs.shiny_hunt',
         'cogs.settings',
         'cogs.prediction',
