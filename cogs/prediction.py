@@ -169,86 +169,113 @@ class Prediction(commands.Cog):
         return None
 
     # ------------------------------------------------------------------
-    # Ping information (runs fully in parallel)
+    # Ping information — ALL gathered in a single batched call
     # ------------------------------------------------------------------
-    async def get_pokemon_ping_info(self, pokemon_name: str, guild_id: int) -> dict:
+
+    async def _get_all_ping_data(self, pokemon_name: str, guild_id: int) -> dict:
         """
-        Return a dict with keys:
-            rare_ping, regional_ping   — role mention strings or None
+        Single method that fetches ALL ping data with the minimum possible
+        number of DB round-trips by:
+          - Fetching shiny AFK, collection AFK, and type/region AFK in parallel
+          - Reusing the shared AFK maps instead of re-querying per ping type
+          - Fetching guild settings once for rare/regional role IDs
+        
+        Returns a dict with keys:
+            hunters, collectors, rare_ping, regional_ping,
+            type_pingers, rgn_pingers
         """
         from utils import find_pokemon_by_name
         pokemon = find_pokemon_by_name(pokemon_name, self.pokemon_data)
 
-        result = {"rare_ping": None, "regional_ping": None}
-        if not pokemon:
-            return result
-
-        settings = await self.db.get_guild_settings(guild_id)
-
-        rarity_value = pokemon.get('rarity', '')
-        rarities = rarity_value if isinstance(rarity_value, list) else [rarity_value]
-        rarities = [r.lower() for r in rarities if r]
-
-        if any(r in ['legendary', 'mythical', 'ultra beast'] for r in rarities):
-            rare_role_id = settings.get('rare_role_id')
-            if rare_role_id:
-                result["rare_ping"] = f"<@&{rare_role_id}>"
-
-        if 'regional' in rarities:
-            regional_role_id = settings.get('regional_role_id')
-            if regional_role_id:
-                result["regional_ping"] = f"<@&{regional_role_id}>"
-
-        return result
-
-    async def get_shiny_hunters_for_spawn(self, pokemon_name: str, guild_id: int) -> list:
-        search_names = [pokemon_name]
-        afk_users = await self.db.get_shiny_hunt_afk_users()
-        hunters_data = await self.db.get_shiny_hunters_for_pokemon(guild_id, search_names, afk_users)
-
-        formatted = []
-        for user_id, is_afk in hunters_data:
-            if is_afk:
-                formatted.append(f"{user_id}(AFK)")
-            else:
-                formatted.append(f"<@{user_id}>")
-        return formatted
-
-    async def get_collectors_for_spawn(self, pokemon_name: str, guild_id: int) -> list:
-        from utils import find_pokemon_by_name
-        pokemon = find_pokemon_by_name(pokemon_name, self.pokemon_data)
-
-        search_names = [pokemon_name]
-        afk_users = await self.db.get_collection_afk_users()
-        collectors = await self.db.get_collectors_for_pokemon(guild_id, search_names, afk_users)
-
-        if pokemon and is_rare_pokemon(pokemon):
-            rare_collectors = await self.db.get_rare_collectors(guild_id, afk_users)
-            collectors = list(set(collectors + rare_collectors))
-
-        return collectors
-
-    async def get_type_pingers_for_spawn(self, pokemon_name: str, guild_id: int) -> list:
-        """Get users who want pings for this Pokemon's types."""
-        types = get_pokemon_types(pokemon_name)
-        if not types:
-            return []
-
-        afk_map = await self.db.get_type_region_afk_users()
-        type_afk = {uid for uid, flags in afk_map.items() if flags.get('type')}
-
-        return await self.db.get_users_for_types(guild_id, types, type_afk)
-
-    async def get_region_pingers_for_spawn(self, pokemon_name: str, guild_id: int) -> list:
-        """Get users who want pings for this Pokemon's region."""
+        types   = get_pokemon_types(pokemon_name)
         regions = get_pokemon_region(pokemon_name)
-        if not regions:
-            return []
 
-        afk_map = await self.db.get_type_region_afk_users()
-        region_afk = {uid for uid, flags in afk_map.items() if flags.get('region')}
+        # ── Phase 1: fetch all AFK maps + guild settings in parallel ──────────
+        # Each of these is a single DB call; running them concurrently means
+        # total latency = max(individual latencies) instead of their sum.
+        (
+            shiny_afk_users,
+            collection_afk_users,
+            type_region_afk_map,
+            guild_settings,
+        ) = await asyncio.gather(
+            self.db.get_shiny_hunt_afk_users(),
+            self.db.get_collection_afk_users(),
+            self.db.get_type_region_afk_users(),   # ← fetched ONCE, shared below
+            self.db.get_guild_settings(guild_id),
+        )
 
-        return await self.db.get_users_for_regions(guild_id, regions, region_afk)
+        # Derive per-type AFK sets from the shared map (no extra DB call)
+        type_afk   = {uid for uid, flags in type_region_afk_map.items() if flags.get('type')}
+        region_afk = {uid for uid, flags in type_region_afk_map.items() if flags.get('region')}
+
+        # ── Phase 2: fetch actual ping lists in parallel ───────────────────────
+        search_names = [pokemon_name]
+
+        is_rare = pokemon and is_rare_pokemon(pokemon)
+
+        async def _get_shiny_hunters():
+            hunters_data = await self.db.get_shiny_hunters_for_pokemon(
+                guild_id, search_names, shiny_afk_users
+            )
+            formatted = []
+            for user_id, is_afk in hunters_data:
+                formatted.append(f"{user_id}(AFK)" if is_afk else f"<@{user_id}>")
+            return formatted
+
+        async def _get_collectors():
+            collectors = await self.db.get_collectors_for_pokemon(
+                guild_id, search_names, collection_afk_users
+            )
+            if is_rare:
+                rare_collectors = await self.db.get_rare_collectors(guild_id, collection_afk_users)
+                collectors = list(set(collectors + rare_collectors))
+            return collectors
+
+        async def _get_type_pingers():
+            if not types:
+                return []
+            return await self.db.get_users_for_types(guild_id, types, type_afk)
+
+        async def _get_region_pingers():
+            if not regions:
+                return []
+            return await self.db.get_users_for_regions(guild_id, regions, region_afk)
+
+        hunters, collectors, type_pingers, rgn_pingers = await asyncio.gather(
+            _get_shiny_hunters(),
+            _get_collectors(),
+            _get_type_pingers(),
+            _get_region_pingers(),
+        )
+
+        # ── Phase 3: resolve rare/regional role pings from cached settings ────
+        rare_ping     = None
+        regional_ping = None
+
+        if pokemon:
+            rarity_value = pokemon.get('rarity', '')
+            rarities = rarity_value if isinstance(rarity_value, list) else [rarity_value]
+            rarities = [r.lower() for r in rarities if r]
+
+            if any(r in ['legendary', 'mythical', 'ultra beast'] for r in rarities):
+                rare_role_id = guild_settings.get('rare_role_id')
+                if rare_role_id:
+                    rare_ping = f"<@&{rare_role_id}>"
+
+            if 'regional' in rarities:
+                regional_role_id = guild_settings.get('regional_role_id')
+                if regional_role_id:
+                    regional_ping = f"<@&{regional_role_id}>"
+
+        return {
+            "hunters":       hunters,
+            "collectors":    collectors,
+            "rare_ping":     rare_ping,
+            "regional_ping": regional_ping,
+            "type_pingers":  type_pingers,
+            "rgn_pingers":   rgn_pingers,
+        }
 
     # ------------------------------------------------------------------
     # Output formatting
@@ -262,67 +289,41 @@ class Prediction(commands.Cog):
         show_best_name: bool = False,
     ) -> str:
         """
-        Gather all ping data in parallel and build the final output string.
+        Gather ALL ping data in a single batched call and build the output string.
 
         Output order:
-            <Name>: <confidence>%
-            Shortest Name: <name>          ← only if best_name enabled
-            Rare Ping: <@&role>            ← only if applicable
-            Regional Ping: <@&role>        ← only if applicable
+            <name>: <confidence>%
+            Shortest Name: <n>          ← only if best_name enabled
+            Rare Ping: <@&role>         ← only if applicable
+            Regional Pings: <@&role>    ← only if applicable
             Shiny Hunters: @...
             Collectors: @...
             Type Pings: @...
             Region Pings: @...
         """
-        tasks = [
-            self.get_shiny_hunters_for_spawn(name, guild_id),      # 0
-            self.get_collectors_for_spawn(name, guild_id),          # 1
-            self.get_pokemon_ping_info(name, guild_id),             # 2
-            self.get_type_pingers_for_spawn(name, guild_id),        # 3
-            self.get_region_pingers_for_spawn(name, guild_id),      # 4
-        ]
-
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        hunters      = results[0] if isinstance(results[0], list) else []
-        collectors   = results[1] if isinstance(results[1], list) else []
-        ping_info    = results[2] if isinstance(results[2], dict)  else {}
-        type_pingers = results[3] if isinstance(results[3], list) else []
-        rgn_pingers  = results[4] if isinstance(results[4], list) else []
+        ping_data = await self._get_all_ping_data(name, guild_id)
 
         lines = [format_pokemon_prediction(name, confidence)]
 
-        # Best name (shortest)
         if show_best_name:
             best = get_best_name(name)
             if best:
                 lines.append(f"Shortest Name: {best}")
 
-        # Rare / Regional role pings
-        rare_ping = ping_info.get("rare_ping")
-        regional_ping = ping_info.get("regional_ping")
-
-        if rare_ping:
-            lines.append(f"Rare Ping: {rare_ping}")
-        if regional_ping:
-            lines.append(f"Regional Pings: {regional_ping}")
-
-        # Shiny hunters
-        if hunters:
-            lines.append(f"Shiny Hunters: {' '.join(hunters)}")
-
-        # Collectors
-        if collectors:
-            collector_mentions = " ".join([f"<@{uid}>" for uid in collectors])
+        if ping_data["rare_ping"]:
+            lines.append(f"Rare Ping: {ping_data['rare_ping']}")
+        if ping_data["regional_ping"]:
+            lines.append(f"Regional Pings: {ping_data['regional_ping']}")
+        if ping_data["hunters"]:
+            lines.append(f"Shiny Hunters: {' '.join(ping_data['hunters'])}")
+        if ping_data["collectors"]:
+            collector_mentions = " ".join([f"<@{uid}>" for uid in ping_data["collectors"]])
             lines.append(f"Collectors: {collector_mentions}")
-
-        # Type pings
-        if type_pingers:
-            type_mentions = " ".join([f"<@{uid}>" for uid in type_pingers])
+        if ping_data["type_pingers"]:
+            type_mentions = " ".join([f"<@{uid}>" for uid in ping_data["type_pingers"]])
             lines.append(f"Type Pings: {type_mentions}")
-
-        # Region pings
-        if rgn_pingers:
-            rgn_mentions = " ".join([f"<@{uid}>" for uid in rgn_pingers])
+        if ping_data["rgn_pingers"]:
+            rgn_mentions = " ".join([f"<@{uid}>" for uid in ping_data["rgn_pingers"]])
             lines.append(f"Region Pings: {rgn_mentions}")
 
         return "\n".join(lines)
@@ -360,22 +361,26 @@ class Prediction(commands.Cog):
     # ------------------------------------------------------------------
     # should_send_prediction
     # ------------------------------------------------------------------
-    async def should_send_prediction(
-        self, name: str, guild_id: int,
-        hunters, collectors, ping_info,
-        type_pingers=None, rgn_pingers=None
+    def should_send_prediction_from_data(
+        self,
+        only_pings_enabled: bool,
+        ping_data: dict,
     ) -> bool:
-        only_pings_enabled = await self.db.get_only_pings(guild_id)
+        """
+        Synchronous check — ping_data already fetched, only_pings already known.
+        Avoids an extra DB call for get_only_pings().
+        """
         if not only_pings_enabled:
             return True
 
-        has_hunters    = isinstance(hunters, list) and len(hunters) > 0
-        has_collectors = isinstance(collectors, list) and len(collectors) > 0
-        has_ping_info  = isinstance(ping_info, dict) and any(ping_info.values())
-        has_type       = isinstance(type_pingers, list) and len(type_pingers) > 0
-        has_region     = isinstance(rgn_pingers, list) and len(rgn_pingers) > 0
-
-        return has_hunters or has_collectors or has_ping_info or has_type or has_region
+        return (
+            bool(ping_data.get("hunters"))
+            or bool(ping_data.get("collectors"))
+            or bool(ping_data.get("rare_ping"))
+            or bool(ping_data.get("regional_ping"))
+            or bool(ping_data.get("type_pingers"))
+            or bool(ping_data.get("rgn_pingers"))
+        )
 
     # ------------------------------------------------------------------
     # Secondary model logging
@@ -539,50 +544,47 @@ class Prediction(commands.Cog):
                                     try:
                                         confidence_value = float(confidence_str)
 
-                                        # Gather all pings in parallel (no extra latency)
-                                        tasks = [
-                                            self.get_shiny_hunters_for_spawn(name, message.guild.id),
-                                            self.get_collectors_for_spawn(name, message.guild.id),
-                                            self.get_pokemon_ping_info(name, message.guild.id),
-                                            self.get_type_pingers_for_spawn(name, message.guild.id),
-                                            self.get_region_pingers_for_spawn(name, message.guild.id),
-                                        ]
-                                        results = await asyncio.gather(*tasks, return_exceptions=True)
-                                        hunters      = results[0] if isinstance(results[0], list) else []
-                                        collectors   = results[1] if isinstance(results[1], list) else []
-                                        ping_info    = results[2] if isinstance(results[2], dict)  else {}
-                                        type_pingers = results[3] if isinstance(results[3], list) else []
-                                        rgn_pingers  = results[4] if isinstance(results[4], list) else []
+                                        # ── Fetch everything needed in parallel ──────────────
+                                        # ping data (all DB calls batched) + only_pings + best_name
+                                        ping_data, only_pings_enabled, show_best = await asyncio.gather(
+                                            self._get_all_ping_data(name, message.guild.id),
+                                            self.db.get_only_pings(message.guild.id),
+                                            self.db.get_best_name(message.guild.id),
+                                        )
 
-                                        should_send = await self.should_send_prediction(
-                                            name, message.guild.id,
-                                            hunters, collectors, ping_info,
-                                            type_pingers, rgn_pingers
+                                        should_send = self.should_send_prediction_from_data(
+                                            only_pings_enabled, ping_data
                                         )
 
                                         if should_send:
-                                            show_best = await self.db.get_best_name(message.guild.id)
-
                                             lines = [format_pokemon_prediction(name, confidence)]
+
                                             if show_best:
                                                 best = get_best_name(name)
                                                 if best:
                                                     lines.append(f"Shortest Name: {best}")
 
-                                            rare_ping = ping_info.get("rare_ping")
-                                            regional_ping = ping_info.get("regional_ping")
-                                            if rare_ping:
-                                                lines.append(f"Rare Ping: {rare_ping}")
-                                            if regional_ping:
-                                                lines.append(f"Regional Pings: {regional_ping}")
-                                            if hunters:
-                                                lines.append(f"Shiny Hunters: {' '.join(hunters)}")
-                                            if collectors:
-                                                lines.append(f"Collectors: {' '.join([f'<@{uid}>' for uid in collectors])}")
-                                            if type_pingers:
-                                                lines.append(f"Type Pings: {' '.join([f'<@{uid}>' for uid in type_pingers])}")
-                                            if rgn_pingers:
-                                                lines.append(f"Region Pings: {' '.join([f'<@{uid}>' for uid in rgn_pingers])}")
+                                            if ping_data["rare_ping"]:
+                                                lines.append(f"Rare Ping: {ping_data['rare_ping']}")
+                                            if ping_data["regional_ping"]:
+                                                lines.append(f"Regional Pings: {ping_data['regional_ping']}")
+                                            if ping_data["hunters"]:
+                                                lines.append(f"Shiny Hunters: {' '.join(ping_data['hunters'])}")
+                                            if ping_data["collectors"]:
+                                                collector_mentions = " ".join(
+                                                    [f"<@{uid}>" for uid in ping_data["collectors"]]
+                                                )
+                                                lines.append(f"Collectors: {collector_mentions}")
+                                            if ping_data["type_pingers"]:
+                                                type_mentions = " ".join(
+                                                    [f"<@{uid}>" for uid in ping_data["type_pingers"]]
+                                                )
+                                                lines.append(f"Type Pings: {type_mentions}")
+                                            if ping_data["rgn_pingers"]:
+                                                rgn_mentions = " ".join(
+                                                    [f"<@{uid}>" for uid in ping_data["rgn_pingers"]]
+                                                )
+                                                lines.append(f"Region Pings: {rgn_mentions}")
 
                                             await message.channel.send(
                                                 "\n".join(lines),
