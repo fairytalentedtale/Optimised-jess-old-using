@@ -32,9 +32,9 @@ ALL_REGIONS = [
 ]
 
 SAFE_MENTIONS = discord.AllowedMentions(
-    everyone=False,
-    roles=False,
-    users=False   # keep @user mentions for hunters/collectors
+    everyone=True,
+    roles=True,
+    users=True   # keep @user mentions for hunters/collectors
 )
 
 # ---------------------------------------------------------------------------
