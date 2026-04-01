@@ -8,6 +8,9 @@ class Database:
     def __init__(self):
         self.client = None
         self.db = None
+        # Set by prediction.py after cog init: bot.db.gcache = self.gcache
+        # Allows DB mutation methods to invalidate cache entries automatically.
+        self.gcache = None
 
     async def connect(self):
         """Initialize MongoDB connection"""
@@ -96,6 +99,8 @@ class Database:
             {"$addToSet": {"pokemon": {"$each": pokemon_names}}},
             upsert=True
         )
+        if self.gcache:
+            self.gcache.invalidate_collectors(guild_id)
 
     async def remove_pokemon_from_collection(self, user_id: int, guild_id: int, pokemon_names: List[str]):
         """Remove Pokemon from user's collection"""
@@ -103,6 +108,8 @@ class Database:
             {"user_id": user_id, "guild_id": guild_id},
             {"$pullAll": {"pokemon": pokemon_names}}
         )
+        if self.gcache:
+            self.gcache.invalidate_collectors(guild_id)
         return result.modified_count > 0
 
     async def clear_collection(self, user_id: int, guild_id: int):
@@ -110,6 +117,8 @@ class Database:
         result = await self.db.collections.delete_one(
             {"user_id": user_id, "guild_id": guild_id}
         )
+        if self.gcache:
+            self.gcache.invalidate_collectors(guild_id)
         return result.deleted_count > 0
 
     async def get_user_collection(self, user_id: int, guild_id: int) -> List[str]:
@@ -152,12 +161,16 @@ class Database:
             {"$set": {"pokemon": pokemon_names}},
             upsert=True
         )
+        if self.gcache:
+            self.gcache.invalidate_shiny_hunts(guild_id)
 
     async def clear_shiny_hunt(self, user_id: int, guild_id: int):
         """Clear user's shiny hunt"""
         result = await self.db.shiny_hunts.delete_one(
             {"user_id": user_id, "guild_id": guild_id}
         )
+        if self.gcache:
+            self.gcache.invalidate_shiny_hunts(guild_id)
         return result.deleted_count > 0
 
     async def get_user_shiny_hunt(self, user_id: int, guild_id: int):
@@ -222,14 +235,18 @@ class Database:
 
         if current and current.get('afk'):
             await self.db.collection_afk_users.delete_one({"user_id": user_id})
-            return False
+            result = False
         else:
             await self.db.collection_afk_users.update_one(
                 {"user_id": user_id},
                 {"$set": {"afk": True}},
                 upsert=True
             )
-            return True
+            result = True
+
+        if self.gcache:
+            self.gcache.invalidate_afk()
+        return result
 
     async def toggle_shiny_hunt_afk(self, user_id: int) -> bool:
         """Toggle global shiny hunt AFK status. Returns new state"""
@@ -237,14 +254,18 @@ class Database:
 
         if current and current.get('afk'):
             await self.db.shiny_hunt_afk_users.delete_one({"user_id": user_id})
-            return False
+            result = False
         else:
             await self.db.shiny_hunt_afk_users.update_one(
                 {"user_id": user_id},
                 {"$set": {"afk": True}},
                 upsert=True
             )
-            return True
+            result = True
+
+        if self.gcache:
+            self.gcache.invalidate_afk()
+        return result
 
     async def is_collection_afk(self, user_id: int) -> bool:
         """Check if user is globally collection AFK"""
@@ -280,6 +301,8 @@ class Database:
             {"$set": {"type_ping_afk": new_val}},
             upsert=True
         )
+        if self.gcache:
+            self.gcache.invalidate_afk()
         return new_val
 
     async def toggle_region_ping_afk(self, user_id: int) -> bool:
@@ -291,6 +314,8 @@ class Database:
             {"$set": {"region_ping_afk": new_val}},
             upsert=True
         )
+        if self.gcache:
+            self.gcache.invalidate_afk()
         return new_val
 
     async def get_type_region_afk_users(self) -> dict:
@@ -437,6 +462,8 @@ class Database:
                 {"$set": {"rare_role_id": role_id}},
                 upsert=True
             )
+        if self.gcache:
+            self.gcache.invalidate_guild_settings(guild_id)
 
     async def set_regional_role(self, guild_id: int, role_id: Optional[int]):
         """Set or clear regional ping role"""
@@ -452,6 +479,8 @@ class Database:
                 {"$set": {"regional_role_id": role_id}},
                 upsert=True
             )
+        if self.gcache:
+            self.gcache.invalidate_guild_settings(guild_id)
 
     async def set_low_prediction_channel(self, channel_id: int):
         """Set global low prediction channel"""
@@ -605,6 +634,8 @@ class Database:
             {"$set": {"only_pings": enabled}},
             upsert=True
         )
+        if self.gcache:
+            self.gcache.invalidate_guild_settings(guild_id)
 
     async def get_only_pings(self, guild_id: int) -> bool:
         settings = await self.db.guild_settings.find_one({"guild_id": guild_id})
@@ -620,11 +651,13 @@ class Database:
             {"$set": {"best_name_enabled": enabled}},
             upsert=True
         )
+        if self.gcache:
+            self.gcache.invalidate_guild_settings(guild_id)
 
     async def get_best_name(self, guild_id: int) -> bool:
         """Get best name setting for a guild (default: False)"""
         settings = await self.db.guild_settings.find_one({"guild_id": guild_id})
-        return settings.get('best_name_enabled', False) if settings else False
+        return settings.get('best_name_enabled', True) if settings else True
 
     # -------------------------------------------------------------------------
     # Secondary model channel
