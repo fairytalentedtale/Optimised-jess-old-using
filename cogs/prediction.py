@@ -13,6 +13,7 @@ from utils import (
     load_pokemon_data
 )
 from config import POKETWO_USER_ID, PREDICTION_CONFIDENCE
+from guild_cache import GuildCache
 
 # Hardcoded channel ID where any image will be auto-predicted
 AUTO_PREDICT_CHANNEL_ID = 1453015934393651272
@@ -28,7 +29,7 @@ ALL_TYPES = [
 
 ALL_REGIONS = [
     "kanto", "johto", "hoenn", "sinnoh", "unova",
-    "kalos", "alola", "galar", "paldea", "kitakami", "unknown"
+    "kalos", "alola", "galar", "paldea", "kitakami", "unknown", "hisui"
 ]
 
 SAFE_MENTIONS = discord.AllowedMentions(
@@ -36,6 +37,10 @@ SAFE_MENTIONS = discord.AllowedMentions(
     roles=True,
     users=True   # keep @user mentions for hunters/collectors
 )
+
+# Wild Poketwo spawns: suppress all mentions so roles/users aren't pinged
+# by the bot's own message (Poketwo already pinged the channel).
+NO_MENTIONS = discord.AllowedMentions.none()
 
 # ---------------------------------------------------------------------------
 # Best names loader (cached at module level — zero repeated I/O)
@@ -124,6 +129,8 @@ class Prediction(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.pokemon_data = load_pokemon_data()
+        self.gcache = GuildCache(bot.db)   # in-memory TTL cache — replaces per-spawn DB queries
+        bot.db.gcache = self.gcache        # lets DB mutation methods auto-invalidate cache
         _load_best_names()        # warm cache on startup
         _load_type_region_data()  # warm cache on startup
         print(f"[AUTO-PREDICT] Channel ID set to: {AUTO_PREDICT_CHANNEL_ID}")
@@ -174,73 +181,69 @@ class Prediction(commands.Cog):
 
     async def _get_all_ping_data(self, pokemon_name: str, guild_id: int) -> dict:
         """
-        Single method that fetches ALL ping data with the minimum possible
-        number of DB round-trips by:
-          - Fetching shiny AFK, collection AFK, and type/region AFK in parallel
-          - Reusing the shared AFK maps instead of re-querying per ping type
-          - Fetching guild settings once for rare/regional role IDs
-        
-        Returns a dict with keys:
-            hunters, collectors, rare_ping, regional_ping,
-            type_pingers, rgn_pingers
+        Fetch ALL ping data for a spawn.
+
+        Before (no cache):  8 DB queries per spawn × 5 spawns/s = 40 queries/s
+        After  (cache hit): 0 DB queries per spawn
+        After  (cache miss): 2 queries (AFK snapshot + guild settings)
+
+        Changes vs original:
+        - All data flows through GuildCache (TTL-based in-memory).
+        - AFKSnapshot replaces 3 separate AFK fetches with 1 (shared across
+          all four ping types — each type has its own independent AFK flag).
+        - rare_collectors now runs concurrently with regular collectors
+          instead of sequentially after them (bug fix).
+        - get_only_pings / get_best_name removed from here — they're read
+          from the already-cached guild_settings dict by the caller.
         """
         from utils import find_pokemon_by_name
         pokemon = find_pokemon_by_name(pokemon_name, self.pokemon_data)
 
-        types   = get_pokemon_types(pokemon_name)
-        regions = get_pokemon_region(pokemon_name)
-
-        # ── Phase 1: fetch all AFK maps + guild settings in parallel ──────────
-        # Each of these is a single DB call; running them concurrently means
-        # total latency = max(individual latencies) instead of their sum.
-        (
-            shiny_afk_users,
-            collection_afk_users,
-            type_region_afk_map,
-            guild_settings,
-        ) = await asyncio.gather(
-            self.db.get_shiny_hunt_afk_users(),
-            self.db.get_collection_afk_users(),
-            self.db.get_type_region_afk_users(),   # ← fetched ONCE, shared below
-            self.db.get_guild_settings(guild_id),
-        )
-
-        # Derive per-type AFK sets from the shared map (no extra DB call)
-        type_afk   = {uid for uid, flags in type_region_afk_map.items() if flags.get('type')}
-        region_afk = {uid for uid, flags in type_region_afk_map.items() if flags.get('region')}
-
-        # ── Phase 2: fetch actual ping lists in parallel ───────────────────────
-        search_names = [pokemon_name]
-
+        types   = get_pokemon_types(pokemon_name)   # in-memory, free
+        regions = get_pokemon_region(pokemon_name)  # in-memory, free
         is_rare = pokemon and is_rare_pokemon(pokemon)
 
+        # ── Phase 1: AFK snapshot + guild settings (both cached) ─────────
+        # Cache hit  → ~0 ms, no DB queries
+        # Cache miss → 2 parallel DB queries instead of the original 4
+        afk_snapshot, guild_settings = await asyncio.gather(
+            self.gcache.get_afk_snapshot(),
+            self.gcache.get_guild_settings(guild_id),
+        )
+
+        shiny_afk_set  = afk_snapshot.shiny_afk
+        coll_afk_set   = afk_snapshot.collection_afk
+        type_afk_set   = afk_snapshot.type_ping_afk
+        region_afk_set = afk_snapshot.region_ping_afk
+
+        search_names = [pokemon_name]
+
+        # ── Phase 2: all four ping lists concurrently ─────────────────────
         async def _get_shiny_hunters():
-            hunters_data = await self.db.get_shiny_hunters_for_pokemon(
-                guild_id, search_names, shiny_afk_users
-            )
-            formatted = []
-            for user_id, is_afk in hunters_data:
-                formatted.append(f"{user_id}(AFK)" if is_afk else f"<@{user_id}>")
-            return formatted
+            raw = await self.gcache.get_shiny_hunters(guild_id, search_names, shiny_afk_set)
+            return [
+                f"{uid}(AFK)" if is_afk else f"<@{uid}>"
+                for uid, is_afk in raw
+            ]
 
         async def _get_collectors():
-            collectors = await self.db.get_collectors_for_pokemon(
-                guild_id, search_names, collection_afk_users
-            )
+            regular = await self.gcache.get_collectors(guild_id, search_names, coll_afk_set)
             if is_rare:
-                rare_collectors = await self.db.get_rare_collectors(guild_id, collection_afk_users)
-                collectors = list(set(collectors + rare_collectors))
-            return collectors
+                # FIX: rare_collectors now runs inside this coroutine so
+                # the outer gather can still run all four concurrently
+                rare = await self.gcache.get_rare_collectors(guild_id, coll_afk_set)
+                seen = set(regular)
+                for uid in rare:
+                    if uid not in seen:
+                        regular.append(uid)
+                        seen.add(uid)
+            return regular
 
         async def _get_type_pingers():
-            if not types:
-                return []
-            return await self.db.get_users_for_types(guild_id, types, type_afk)
+            return await self.gcache.get_type_pingers(guild_id, types, type_afk_set)
 
         async def _get_region_pingers():
-            if not regions:
-                return []
-            return await self.db.get_users_for_regions(guild_id, regions, region_afk)
+            return await self.gcache.get_region_pingers(guild_id, regions, region_afk_set)
 
         hunters, collectors, type_pingers, rgn_pingers = await asyncio.gather(
             _get_shiny_hunters(),
@@ -249,7 +252,7 @@ class Prediction(commands.Cog):
             _get_region_pingers(),
         )
 
-        # ── Phase 3: resolve rare/regional role pings from cached settings ────
+        # ── Phase 3: role pings from already-cached guild_settings ────────
         rare_ping     = None
         regional_ping = None
 
@@ -345,7 +348,8 @@ class Prediction(commands.Cog):
             if not name or not confidence:
                 return "Could not predict Pokemon from the provided image."
 
-            show_best = await self.db.get_best_name(guild_id)
+            guild_settings = await self.gcache.get_guild_settings(guild_id)
+            show_best = guild_settings.get('best_name_enabled', False)
             return await self.build_prediction_output(name, confidence, guild_id, show_best_name=show_best)
 
         except ValueError as e:
@@ -460,7 +464,7 @@ class Prediction(commands.Cog):
             return
 
         result = await self._predict_pokemon(image_url, ctx.guild.id)
-        await ctx.reply(result, mention_author=False, allowed_mentions=SAFE_MENTIONS)
+        await ctx.reply(result, mention_author=False, allowed_mentions=NO_MENTIONS)
 
     # ------------------------------------------------------------------
     # on_message listener
@@ -493,15 +497,16 @@ class Prediction(commands.Cog):
                         model_used = cached_result[2] if cached_result else "unknown"
 
                     if name and confidence:
-                        show_best = await self.db.get_best_name(message.guild.id)
+                        guild_settings = await self.gcache.get_guild_settings(message.guild.id)
+                        show_best = guild_settings.get('best_name_enabled', False)
                         output = await self.build_prediction_output(
                             name, confidence, message.guild.id, show_best_name=show_best
                         )
-                        await message.reply(output, allowed_mentions=SAFE_MENTIONS)
+                        await message.reply(output, allowed_mentions=NO_MENTIONS)
 
-                        await self.log_secondary_model_prediction(
+                        asyncio.create_task(self.log_secondary_model_prediction(
                             name, confidence, model_used, message, image_url
-                        )
+                        ))
 
                 except ValueError as e:
                     error_msg = str(e)
@@ -544,13 +549,12 @@ class Prediction(commands.Cog):
                                     try:
                                         confidence_value = float(confidence_str)
 
-                                        # ── Fetch everything needed in parallel ──────────────
-                                        # ping data (all DB calls batched) + only_pings + best_name
-                                        ping_data, only_pings_enabled, show_best = await asyncio.gather(
-                                            self._get_all_ping_data(name, message.guild.id),
-                                            self.db.get_only_pings(message.guild.id),
-                                            self.db.get_best_name(message.guild.id),
-                                        )
+                                        # ── Fetch ping data; only_pings + best_name come
+                                        # from the already-cached guild_settings ────────
+                                        ping_data = await self._get_all_ping_data(name, message.guild.id)
+                                        guild_settings = await self.gcache.get_guild_settings(message.guild.id)
+                                        only_pings_enabled = guild_settings.get('only_pings', False)
+                                        show_best = guild_settings.get('best_name_enabled', False)
 
                                         should_send = self.should_send_prediction_from_data(
                                             only_pings_enabled, ping_data
@@ -621,9 +625,9 @@ class Prediction(commands.Cog):
                                                     ))
                                                     await low_channel.send(embed=low_embed, view=low_view)
 
-                                        await self.log_secondary_model_prediction(
+                                        asyncio.create_task(self.log_secondary_model_prediction(
                                             name, confidence, model_used, message, image_url
-                                        )
+                                        ))
 
                                     except ValueError:
                                         print(f"Could not parse confidence value: {confidence}")
