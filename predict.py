@@ -45,7 +45,7 @@ SECONDARY_METADATA_PATH = os.path.join(CACHE_DIR, "model_metadata.json")
 
 class PredictionCache:
     """Ultra-lightweight cache - ONLY stores final results"""
-    def __init__(self, max_size=200, ttl_seconds=900):  # 200 items, 15min TTL
+    def __init__(self, max_size=100, ttl_seconds=300):  # 100 items, 5min TTL (Poketwo images expire anyway)
         self.cache = {}
         self.timestamps = {}
         self.max_size = max_size
