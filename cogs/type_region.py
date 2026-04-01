@@ -14,7 +14,7 @@ ALL_TYPES = [
 
 ALL_REGIONS = [
     "kanto", "johto", "hoenn", "sinnoh", "unova",
-    "kalos", "alola", "galar", "paldea", "kitakami", "unknown"
+    "kalos", "alola", "galar", "paldea", "kitakami", "unknown", "hisui"
 ]
 
 # One emoji per type for the button labels
@@ -28,7 +28,7 @@ TYPE_EMOJI = {
 
 REGION_EMOJI = {
     "kanto":  "1️⃣", "johto":  "2️⃣", "hoenn":  "3️⃣", "sinnoh": "4️⃣",
-    "unova":  "5️⃣", "kalos":  "6️⃣", "alola":  "7️⃣", "galar":  "8️⃣", "paldea": "9️⃣", "unknown": "❓", "kitakami": "🌏",
+    "unova":  "5️⃣", "kalos":  "6️⃣", "alola":  "7️⃣", "galar":  "8️⃣", "paldea": "9️⃣", "unknown": "❓", "kitakami": "🌏", "hisui": "🌏",
 }
 
 
@@ -102,6 +102,7 @@ class TypePingView(discord.ui.View):
         self.guild_id = guild_id
         self.enabled_types = list(enabled_types)
         self.cog = cog
+        self._message: discord.Message | None = None
         self._build_buttons()
 
     def _build_buttons(self):
@@ -133,11 +134,25 @@ class TypePingView(discord.ui.View):
                 if pokemon_type in self.enabled_types:
                     self.enabled_types.remove(pokemon_type)
 
+            # Invalidate cache so next spawn sees the updated type pings
+            if hasattr(self.cog, 'gcache'):
+                self.cog.gcache.invalidate_type_pingers(self.guild_id)
+
             self._build_buttons()
             embed = _type_embed(interaction.user, self.enabled_types)
             await interaction.response.edit_message(embed=embed, view=self)
 
         return callback
+
+    async def on_timeout(self):
+        """Disable all buttons when the view expires."""
+        for item in self.children:
+            item.disabled = True
+        if self._message:
+            try:
+                await self._message.edit(view=self)
+            except discord.HTTPException:
+                pass
 
 
 # ---------------------------------------------------------------------------
@@ -150,6 +165,7 @@ class RegionPingView(discord.ui.View):
         self.guild_id = guild_id
         self.enabled_regions = list(enabled_regions)
         self.cog = cog
+        self._message: discord.Message | None = None
         self._build_buttons()
 
     def _build_buttons(self):
@@ -181,11 +197,25 @@ class RegionPingView(discord.ui.View):
                 if region in self.enabled_regions:
                     self.enabled_regions.remove(region)
 
+            # Invalidate cache so next spawn sees the updated region pings
+            if hasattr(self.cog, 'gcache'):
+                self.cog.gcache.invalidate_region_pingers(self.guild_id)
+
             self._build_buttons()
             embed = _region_embed(interaction.user, self.enabled_regions)
             await interaction.response.edit_message(embed=embed, view=self)
 
         return callback
+
+    async def on_timeout(self):
+        """Disable all buttons when the view expires."""
+        for item in self.children:
+            item.disabled = True
+        if self._message:
+            try:
+                await self._message.edit(view=self)
+            except discord.HTTPException:
+                pass
 
 
 # ---------------------------------------------------------------------------
@@ -200,6 +230,11 @@ class TypeRegionPings(commands.Cog):
     @property
     def db(self):
         return self.bot.db
+
+    @property
+    def gcache(self):
+        pred_cog = self.bot.get_cog('Prediction')
+        return pred_cog.gcache if pred_cog else None
 
     # ------------------------------------------------------------------
     # p!tp / p!typepings
@@ -247,7 +282,8 @@ class TypeRegionPings(commands.Cog):
         # Interactive menu
         view = TypePingView(ctx.author.id, ctx.guild.id, enabled, self)
         embed = _type_embed(ctx.author, enabled)
-        await ctx.reply(embed=embed, view=view, mention_author=False)
+        msg = await ctx.reply(embed=embed, view=view, mention_author=False)
+        view._message = msg
 
     # ------------------------------------------------------------------
     # p!rp / p!regionpings
@@ -293,7 +329,8 @@ class TypeRegionPings(commands.Cog):
         # Interactive menu
         view = RegionPingView(ctx.author.id, ctx.guild.id, enabled, self)
         embed = _region_embed(ctx.author, enabled)
-        await ctx.reply(embed=embed, view=view, mention_author=False)
+        msg = await ctx.reply(embed=embed, view=view, mention_author=False)
+        view._message = msg
 
 
 async def setup(bot):
