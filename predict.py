@@ -10,7 +10,20 @@ import time
 import hashlib
 import asyncio
 import gc
+import re
 from typing import Optional, Tuple
+
+# Discord CDN URLs contain rotating query params (?ex=...&hm=...&is=...) that
+# change every message even for the same image file.  Strip them so the same
+# Pokémon image always hits the prediction cache regardless of URL refresh.
+_DISCORD_CDN_RE = re.compile(
+    r'^(https?://(?:cdn\.discordapp\.com|media\.discordapp\.net)/[^?#]+)'
+)
+
+def _stable_cache_key(url: str) -> str:
+    m = _DISCORD_CDN_RE.match(url)
+    stable = m.group(1) if m else url
+    return hashlib.md5(stable.encode()).hexdigest()
 
 # GitHub raw content URLs for models
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
@@ -151,7 +164,7 @@ class Prediction:
         self.allow_auto_load = False
         self._cdn_semaphore = asyncio.Semaphore(3)
         self._last_cdn_request = 0
-        self._cdn_min_interval = 0.1
+        self._cdn_min_interval = 0.01  # was 0.1 — Discord CDN rarely rate-limits; 10ms is enough spacing
         self._prediction_counter = 0
         self._loop = None  # cached event loop reference
 
@@ -185,7 +198,7 @@ class Prediction:
         sess_opts.intra_op_num_threads = 1
         sess_opts.inter_op_num_threads = 1
         sess_opts.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
-        sess_opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_BASIC
+        sess_opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
         sess_opts.enable_mem_pattern = False
         sess_opts.enable_cpu_mem_arena = False
         providers = ["CPUExecutionProvider"]
@@ -197,9 +210,18 @@ class Prediction:
         )
         print(f"✅ Primary model initialized: {len(self.primary_class_names)} classes")
 
+        # Separate SessionOptions instance — ORT may mutate the object during init
+        sess_opts2 = ort.SessionOptions()
+        sess_opts2.intra_op_num_threads = 1
+        sess_opts2.inter_op_num_threads = 1
+        sess_opts2.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+        sess_opts2.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+        sess_opts2.enable_mem_pattern = False
+        sess_opts2.enable_cpu_mem_arena = False
+
         self.secondary_session = ort.InferenceSession(
             SECONDARY_ONNX_PATH,
-            sess_options=sess_opts,
+            sess_options=sess_opts2,
             providers=providers
         )
         print(f"✅ Secondary model initialized: {len(self.secondary_class_names)} classes")
@@ -226,7 +248,7 @@ class Prediction:
         gc.collect()
 
     def _generate_cache_key(self, url: str) -> str:
-        return hashlib.md5(url.encode()).hexdigest()
+        return _stable_cache_key(url)
 
     async def _rate_limit_cdn_request(self):
         async with self._cdn_semaphore:
@@ -253,8 +275,6 @@ class Prediction:
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
             'Accept': 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8',
             'Accept-Language': 'en-US,en;q=0.9',
-            'Cache-Control': 'no-cache',
-            'Pragma': 'no-cache',
         }
 
         for attempt in range(max_retries):
@@ -320,7 +340,7 @@ class Prediction:
         Called twice (primary + secondary) with ZERO extra network I/O.
         """
         img = Image.open(io.BytesIO(raw_bytes)).convert("RGB")
-        img = img.resize((width, height), Image.LANCZOS)
+        img = img.resize((width, height), Image.BICUBIC)  # faster than LANCZOS, negligible quality diff for CNN
         image_array = np.array(img, dtype=np.float32)
         img.close()
 
@@ -372,8 +392,8 @@ class Prediction:
         - ONNX inference runs off the event loop via run_in_executor.
         - Raises RuntimeError if models are not loaded.
         """
-        # Cache check
-        cache_key = self._generate_cache_key(url)
+        # Use stable key — Discord CDN rotates ?ex=/hm= but path is permanent
+        cache_key = _stable_cache_key(url)
         cached_result = self.cache.get(cache_key)
         if cached_result:
             return cached_result[0], cached_result[1]
@@ -394,31 +414,28 @@ class Prediction:
         raw_bytes = await self._fetch_raw_bytes(url, session)
 
         try:
-            # Primary inference
+            # Always kick off both inferences concurrently — if primary comes back
+            # >= 85% we use it immediately; otherwise secondary result is already done.
+            loop = self._loop or asyncio.get_event_loop()
             primary_image = self._preprocess_from_bytes(raw_bytes, 224, 224)
-            primary_name, primary_prob = await self.predict_with_model(
-                primary_image, self.primary_session, self.primary_class_names
-            )
-            del primary_image
+            sw = self.secondary_metadata["image_width"]
+            sh = self.secondary_metadata["image_height"]
+            secondary_image = self._preprocess_from_bytes(raw_bytes, sw, sh)
 
-            primary_confidence_pct = primary_prob * 100
+            (primary_name, primary_prob), (secondary_name, secondary_prob) = await asyncio.gather(
+                loop.run_in_executor(None, self._run_inference, self.primary_session, primary_image, self.primary_class_names),
+                loop.run_in_executor(None, self._run_inference, self.secondary_session, secondary_image, self.secondary_class_names),
+            )
+            del primary_image, secondary_image
+
+            primary_confidence_pct   = primary_prob   * 100
+            secondary_confidence_pct = secondary_prob * 100
 
             if primary_confidence_pct >= 85.0:
                 confidence = f"{primary_confidence_pct:.2f}%"
                 self.cache.set(cache_key, (primary_name, confidence, "primary"))
                 self._maybe_gc()
                 return primary_name, confidence
-
-            # Secondary inference — reuse raw_bytes, no re-download
-            sw = self.secondary_metadata["image_width"]
-            sh = self.secondary_metadata["image_height"]
-            secondary_image = self._preprocess_from_bytes(raw_bytes, sw, sh)
-            secondary_name, secondary_prob = await self.predict_with_model(
-                secondary_image, self.secondary_session, self.secondary_class_names
-            )
-            del secondary_image
-
-            secondary_confidence_pct = secondary_prob * 100
 
             if secondary_confidence_pct >= 90.0:
                 confidence = f"{secondary_confidence_pct:.2f}%"
