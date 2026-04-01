@@ -71,6 +71,15 @@ class ModelControl(commands.Cog):
         mem_after = self._get_mem_mb()
         mem_used = mem_after - mem_before
 
+        # Warm guild cache so the first spawns after !loadmodel don't hit the DB
+        pred_cog = self.bot.get_cog('Prediction')
+        if pred_cog and hasattr(pred_cog, 'gcache'):
+            try:
+                guild_ids = [g.id for g in self.bot.guilds]
+                await pred_cog.gcache.warm(guild_ids)
+            except Exception as e:
+                print(f"[LOADMODEL] Cache warm-up failed (non-fatal): {e}")
+
         await loading_msg.edit(
             content=(
                 f"✅ **Models loaded successfully!**\n"
