@@ -51,6 +51,16 @@ SECONDARY_METADATA_PATH = os.path.join(CACHE_DIR, "model_metadata.json")
 PRIMARY_CONFIDENCE_THRESHOLD   = 94.0  # %
 SECONDARY_CONFIDENCE_THRESHOLD = 90.0  # %
 
+# -----------------------------------------------------------------------
+# Pokemon-specific secondary model list
+# If the PRIMARY model identifies a Pokemon in this set, ALWAYS also run
+# the SECONDARY model and return whichever result has higher confidence.
+# Add Pokemon names exactly as they appear in primary model's class labels.
+# -----------------------------------------------------------------------
+SECONDARY_MODEL_POKEMON = {
+    "Pom-pom Oricorio",
+}
+
 
 class PredictionCache:
     """Ultra-lightweight cache - ONLY stores final results"""
@@ -440,6 +450,23 @@ class Prediction:
             primary_confidence_pct   = primary_prob   * 100
             secondary_confidence_pct = secondary_prob * 100
 
+            # ── Pokemon-specific override ────────────────────────────────────
+            # If the primary model identified a Pokemon in the watch list,
+            # always pick whichever model had higher confidence — regardless
+            # of the normal threshold rules.
+            if primary_name in SECONDARY_MODEL_POKEMON:
+                if secondary_confidence_pct >= primary_confidence_pct:
+                    confidence = f"{secondary_confidence_pct:.2f}%"
+                    self.cache.set(cache_key, (secondary_name, confidence, "secondary_override"))
+                    self._maybe_gc()
+                    return secondary_name, confidence
+                else:
+                    confidence = f"{primary_confidence_pct:.2f}%"
+                    self.cache.set(cache_key, (primary_name, confidence, "primary_override"))
+                    self._maybe_gc()
+                    return primary_name, confidence
+
+            # ── Normal threshold logic ───────────────────────────────────────
             if primary_confidence_pct >= PRIMARY_CONFIDENCE_THRESHOLD:
                 confidence = f"{primary_confidence_pct:.2f}%"
                 self.cache.set(cache_key, (primary_name, confidence, "primary"))
