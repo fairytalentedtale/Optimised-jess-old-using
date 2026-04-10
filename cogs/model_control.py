@@ -153,17 +153,14 @@ class ModelControl(commands.Cog):
 
         # Secondary model info
         if loaded and self.predictor.secondary_class_names:
-            meta = self.predictor.secondary_metadata or {}
-            w = meta.get("image_width", "?")
-            h = meta.get("image_height", "?")
-            secondary_info = f"`{len(self.predictor.secondary_class_names)} classes` — {w}×{h}"
+            secondary_info = f"`{len(self.predictor.secondary_class_names)} classes` — 224×224"
         else:
             secondary_info = "_not loaded_"
 
         # Check model cache files on disk
         from predict import (
             PRIMARY_ONNX_PATH, PRIMARY_LABELS_PATH,
-            SECONDARY_ONNX_PATH, SECONDARY_ONNX_DATA_PATH, SECONDARY_METADATA_PATH
+            SECONDARY_ONNX_PATH, SECONDARY_LABELS_PATH
         )
 
         def file_size_str(path):
@@ -176,8 +173,7 @@ class ModelControl(commands.Cog):
             f"Primary model: {file_size_str(PRIMARY_ONNX_PATH)}\n"
             f"Primary labels: {file_size_str(PRIMARY_LABELS_PATH)}\n"
             f"Secondary model: {file_size_str(SECONDARY_ONNX_PATH)}\n"
-            f"Secondary data: {file_size_str(SECONDARY_ONNX_DATA_PATH)}\n"
-            f"Secondary meta: {file_size_str(SECONDARY_METADATA_PATH)}"
+            f"Secondary labels: {file_size_str(SECONDARY_LABELS_PATH)}"
         )
 
         status_emoji = "🟢" if loaded else "🔴"
