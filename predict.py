@@ -72,22 +72,21 @@ def _stable_cache_key(url: str) -> str:
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 PRIMARY_REPO_RAW    = "https://raw.githubusercontent.com/cynthiaofpower/myfinalmodel/main"
 PRIMARY_REPO_LFS    = "https://media.githubusercontent.com/media/cynthiaofpower/myfinalmodel/main"
-SECONDARY_REPO_BASE = ""
+SECONDARY_REPO_RAW = ""
+SECONDARY_REPO_LFS = ""
 
 # .onnx files are stored in Git LFS — must use media URL
 # .json files are plain text — use raw URL
-PRIMARY_ONNX_URL   = f"{PRIMARY_REPO_LFS}/myfinalmodel.onnx"
-PRIMARY_LABELS_URL = f"{PRIMARY_REPO_RAW}/labels.json"
-SECONDARY_ONNX_URL      = f"{SECONDARY_REPO_BASE}/poketwo_pokemon_model.onnx"
-SECONDARY_ONNX_DATA_URL = f"{SECONDARY_REPO_BASE}/poketwo_pokemon_model.onnx.data"
-SECONDARY_METADATA_URL  = f"{SECONDARY_REPO_BASE}/model_metadata.json"
+PRIMARY_ONNX_URL     = f"{PRIMARY_REPO_LFS}/myfinalmodel.onnx"
+PRIMARY_LABELS_URL   = f"{PRIMARY_REPO_RAW}/labels.json"
+SECONDARY_ONNX_URL   = f"{SECONDARY_REPO_LFS}/event.onnx"
+SECONDARY_LABELS_URL = f"{SECONDARY_REPO_RAW}/event_labels.json"
 
 CACHE_DIR = os.path.join(os.path.dirname(os.path.realpath(__file__)), "model_cache")
-PRIMARY_ONNX_PATH   = os.path.join(CACHE_DIR, "myfinalmodel.onnx")
-PRIMARY_LABELS_PATH = os.path.join(CACHE_DIR, "labels.json")
-SECONDARY_ONNX_PATH      = os.path.join(CACHE_DIR, "poketwo_pokemon_model.onnx")
-SECONDARY_ONNX_DATA_PATH = os.path.join(CACHE_DIR, "poketwo_pokemon_model.onnx.data")
-SECONDARY_METADATA_PATH  = os.path.join(CACHE_DIR, "model_metadata.json")
+PRIMARY_ONNX_PATH    = os.path.join(CACHE_DIR, "myfinalmodel.onnx")
+PRIMARY_LABELS_PATH  = os.path.join(CACHE_DIR, "labels.json")
+SECONDARY_ONNX_PATH  = os.path.join(CACHE_DIR, "event.onnx")
+SECONDARY_LABELS_PATH = os.path.join(CACHE_DIR, "event_labels.json")
 
 # -----------------------------------------------------------------------
 # Confidence thresholds — edit these to tune prediction behaviour
@@ -201,9 +200,8 @@ class ModelDownloader:
             (PRIMARY_LABELS_URL, PRIMARY_LABELS_PATH),
         ]
         secondary_downloads = [
-            (SECONDARY_ONNX_URL,      SECONDARY_ONNX_PATH),
-            (SECONDARY_ONNX_DATA_URL, SECONDARY_ONNX_DATA_PATH),
-            (SECONDARY_METADATA_URL,  SECONDARY_METADATA_PATH),
+            (SECONDARY_ONNX_URL,    SECONDARY_ONNX_PATH),
+            (SECONDARY_LABELS_URL,  SECONDARY_LABELS_PATH),
         ]
 
         # Primary downloads are required — raise if any fail
@@ -245,7 +243,6 @@ class Prediction:
         self.secondary_session = None
         self.primary_class_names = None
         self.secondary_class_names = None
-        self.secondary_metadata = None
         self.models_initialized = False
         self.allow_auto_load = False
         self._cdn_semaphore = asyncio.Semaphore(3)
@@ -279,14 +276,19 @@ class Prediction:
             else:
                 raise ValueError("labels_v2.json must be a list or dict")
 
-        # Secondary metadata — optional
+        # Secondary labels — optional
         try:
-            with open(SECONDARY_METADATA_PATH, "r", encoding="utf-8") as f:
-                self.secondary_metadata = json.load(f)
-                self.secondary_class_names = self.secondary_metadata["class_names"]
+            with open(SECONDARY_LABELS_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    sorted_keys = sorted(data.keys(), key=lambda x: int(x))
+                    self.secondary_class_names = [data[k].strip('"') for k in sorted_keys]
+                elif isinstance(data, list):
+                    self.secondary_class_names = [name.strip('"') for name in data]
+                else:
+                    raise ValueError("event_labels.json must be a list or dict")
         except Exception as e:
-            print(f"⚠️ Secondary metadata unavailable (non-fatal): {e}")
-            self.secondary_metadata = None
+            print(f"⚠️ Secondary labels unavailable (non-fatal): {e}")
             self.secondary_class_names = None
 
         providers = ["CPUExecutionProvider"]
@@ -337,7 +339,6 @@ class Prediction:
         self.secondary_session = None
         self.primary_class_names = None
         self.secondary_class_names = None
-        self.secondary_metadata = None
         self.models_initialized = False
         self.allow_auto_load = False
 
@@ -534,14 +535,11 @@ class Prediction:
 
             secondary_available = (
                 self.secondary_session is not None and
-                self.secondary_metadata is not None and
                 self.secondary_class_names is not None
             )
 
             if secondary_available:
-                sw = self.secondary_metadata["image_width"]
-                sh = self.secondary_metadata["image_height"]
-                secondary_image = self._preprocess_from_bytes(raw_bytes, sw, sh)
+                secondary_image = self._preprocess_from_bytes(raw_bytes, 224, 224)
 
                 (primary_name, primary_prob), (secondary_name, secondary_prob) = await asyncio.gather(
                     loop.run_in_executor(None, self._run_inference, self.primary_session, primary_image, self.primary_class_names),
