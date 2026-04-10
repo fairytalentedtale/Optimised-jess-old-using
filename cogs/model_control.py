@@ -162,7 +162,7 @@ class ModelControl(commands.Cog):
 
         # Check model cache files on disk
         from predict import (
-            PRIMARY_ONNX_PATH, PRIMARY_LABELS_PATH,
+            PRIMARY_ONNX_PATH, PRIMARY_ONNX_DATA_PATH, PRIMARY_LABELS_PATH,
             SECONDARY_ONNX_PATH, SECONDARY_ONNX_DATA_PATH, SECONDARY_METADATA_PATH
         )
 
@@ -174,6 +174,7 @@ class ModelControl(commands.Cog):
 
         disk_lines = (
             f"Primary model: {file_size_str(PRIMARY_ONNX_PATH)}\n"
+            f"Primary data: {file_size_str(PRIMARY_ONNX_DATA_PATH)}\n"
             f"Primary labels: {file_size_str(PRIMARY_LABELS_PATH)}\n"
             f"Secondary model: {file_size_str(SECONDARY_ONNX_PATH)}\n"
             f"Secondary data: {file_size_str(SECONDARY_ONNX_DATA_PATH)}\n"
