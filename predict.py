@@ -105,7 +105,7 @@ SECONDARY_CONFIDENCE_THRESHOLD = 90.0  # %
 # Add Pokemon names exactly as they appear in primary model's class labels.
 # -----------------------------------------------------------------------
 SECONDARY_MODEL_POKEMON = {
-    "Pom-pom Oricorio",
+    "Pom Oricorio",
 }
 
 
