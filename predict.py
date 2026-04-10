@@ -404,7 +404,7 @@ class Prediction:
 
         raise ValueError(f"Failed to load image after {max_retries} attempts")
 
-    def _preprocess_from_bytes(self, raw_bytes: bytes, width: int, height: int) -> np.ndarray:
+    def _preprocess_from_bytes(self, raw_bytes: bytes, width: int, height: int):
         """
         Resize + normalise from already-downloaded bytes.
         Called twice (primary + secondary) with ZERO extra network I/O.
@@ -430,7 +430,7 @@ class Prediction:
     # FIX #2: Run blocking ONNX inference in a thread pool executor
     #         so it never blocks the Discord event loop
     # ------------------------------------------------------------------
-    def _run_inference(self, session: ort.InferenceSession, image: np.ndarray,
+    def _run_inference(self, session, image,
                        class_names: list) -> Tuple[str, float]:
         """Synchronous inference — called via run_in_executor."""
         inputs = {session.get_inputs()[0].name: image}
@@ -443,7 +443,7 @@ class Prediction:
         name = class_names[pred_idx] if pred_idx < len(class_names) else f"unknown_{pred_idx}"
         return name, prob
 
-    async def predict_with_model(self, image: np.ndarray, session: ort.InferenceSession,
+    async def predict_with_model(self, image, session,
                                   class_names: list) -> Tuple[str, float]:
         """Async wrapper: offloads blocking inference to thread pool (fix #2)."""
         loop = self._loop or asyncio.get_event_loop()
