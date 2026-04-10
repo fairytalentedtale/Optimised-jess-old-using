@@ -70,23 +70,21 @@ def _stable_cache_key(url: str) -> str:
 
 # GitHub raw content URLs for models
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
-PRIMARY_REPO_RAW   = "https://raw.githubusercontent.com/cynthiaofpower/myfinalmodel/main"
-PRIMARY_REPO_LFS   = "https://media.githubusercontent.com/media/cynthiaofpower/myfinalmodel/main"
-SECONDARY_REPO_BASE = "h"
+PRIMARY_REPO_RAW    = "https://raw.githubusercontent.com/cynthiaofpower/myfinalmodel/main"
+PRIMARY_REPO_LFS    = "https://media.githubusercontent.com/media/cynthiaofpower/myfinalmodel/main"
+SECONDARY_REPO_BASE = "https://raw.githubusercontent.com/teamrocket43434/jessmodel/main"
 
-# .onnx and .data files are stored in Git LFS — must use media URL
+# .onnx files are stored in Git LFS — must use media URL
 # .json files are plain text — use raw URL
-PRIMARY_ONNX_URL      = f"{PRIMARY_REPO_LFS}/myfinalmodel.onnx"
-PRIMARY_ONNX_DATA_URL = f"{PRIMARY_REPO_LFS}/myfinalmodel.onnx.data"
-PRIMARY_LABELS_URL    = f"{PRIMARY_REPO_RAW}/labels.json"
+PRIMARY_ONNX_URL   = f"{PRIMARY_REPO_LFS}/myfinalmodel.onnx"
+PRIMARY_LABELS_URL = f"{PRIMARY_REPO_RAW}/labels.json"
 SECONDARY_ONNX_URL      = f"{SECONDARY_REPO_BASE}/poketwo_pokemon_model.onnx"
 SECONDARY_ONNX_DATA_URL = f"{SECONDARY_REPO_BASE}/poketwo_pokemon_model.onnx.data"
 SECONDARY_METADATA_URL  = f"{SECONDARY_REPO_BASE}/model_metadata.json"
 
 CACHE_DIR = os.path.join(os.path.dirname(os.path.realpath(__file__)), "model_cache")
-PRIMARY_ONNX_PATH      = os.path.join(CACHE_DIR, "myfinalmodel.onnx")
-PRIMARY_ONNX_DATA_PATH = os.path.join(CACHE_DIR, "myfinalmodel.onnx.data")
-PRIMARY_LABELS_PATH    = os.path.join(CACHE_DIR, "labels.json")
+PRIMARY_ONNX_PATH   = os.path.join(CACHE_DIR, "myfinalmodel.onnx")
+PRIMARY_LABELS_PATH = os.path.join(CACHE_DIR, "labels.json")
 SECONDARY_ONNX_PATH      = os.path.join(CACHE_DIR, "poketwo_pokemon_model.onnx")
 SECONDARY_ONNX_DATA_PATH = os.path.join(CACHE_DIR, "poketwo_pokemon_model.onnx.data")
 SECONDARY_METADATA_PATH  = os.path.join(CACHE_DIR, "model_metadata.json")
@@ -199,9 +197,8 @@ class ModelDownloader:
         os.makedirs(CACHE_DIR, exist_ok=True)
 
         primary_downloads = [
-            (PRIMARY_ONNX_URL,      PRIMARY_ONNX_PATH),
-            (PRIMARY_ONNX_DATA_URL, PRIMARY_ONNX_DATA_PATH),
-            (PRIMARY_LABELS_URL,    PRIMARY_LABELS_PATH),
+            (PRIMARY_ONNX_URL,   PRIMARY_ONNX_PATH),
+            (PRIMARY_LABELS_URL, PRIMARY_LABELS_PATH),
         ]
         secondary_downloads = [
             (SECONDARY_ONNX_URL,      SECONDARY_ONNX_PATH),
