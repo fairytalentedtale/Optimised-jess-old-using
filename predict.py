@@ -72,7 +72,7 @@ def _stable_cache_key(url: str) -> str:
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 PRIMARY_REPO_RAW   = "https://raw.githubusercontent.com/cynthiaofpower/myfinalmodel/main"
 PRIMARY_REPO_LFS   = "https://media.githubusercontent.com/media/cynthiaofpower/myfinalmodel/main"
-SECONDARY_REPO_BASE = "https://raw.githubusercontent.com/cynthiaofpower/myfinalmodel/main"
+SECONDARY_REPO_BASE = "https://raw.githubusercontent.com/teamrocket43434/jessmodel/main"
 
 # .onnx and .data files are stored in Git LFS — must use media URL
 # .json files are plain text — use raw URL
@@ -198,27 +198,47 @@ class ModelDownloader:
     async def ensure_models_cached(session: aiohttp.ClientSession):
         os.makedirs(CACHE_DIR, exist_ok=True)
 
-        downloads = [
+        primary_downloads = [
             (PRIMARY_ONNX_URL,      PRIMARY_ONNX_PATH),
             (PRIMARY_ONNX_DATA_URL, PRIMARY_ONNX_DATA_PATH),
             (PRIMARY_LABELS_URL,    PRIMARY_LABELS_PATH),
+        ]
+        secondary_downloads = [
             (SECONDARY_ONNX_URL,      SECONDARY_ONNX_PATH),
             (SECONDARY_ONNX_DATA_URL, SECONDARY_ONNX_DATA_PATH),
             (SECONDARY_METADATA_URL,  SECONDARY_METADATA_PATH),
         ]
 
-        download_tasks = []
-        for url, path in downloads:
+        # Primary downloads are required — raise if any fail
+        primary_tasks = []
+        for url, path in primary_downloads:
             if not os.path.exists(path):
                 print(f"Downloading {os.path.basename(path)}...")
-                download_tasks.append(ModelDownloader.download_file(url, path, session))
+                primary_tasks.append(ModelDownloader.download_file(url, path, session))
             else:
                 print(f"✓ Cached: {os.path.basename(path)}")
 
-        if download_tasks:
-            results = await asyncio.gather(*download_tasks)
+        if primary_tasks:
+            results = await asyncio.gather(*primary_tasks)
             if not all(results):
-                raise Exception("Failed to download some model files")
+                raise Exception("Failed to download primary model files")
+
+        # Secondary downloads are optional — log failures but continue
+        secondary_tasks = []
+        secondary_paths = []
+        for url, path in secondary_downloads:
+            if not os.path.exists(path):
+                print(f"Downloading {os.path.basename(path)}...")
+                secondary_tasks.append(ModelDownloader.download_file(url, path, session))
+                secondary_paths.append(path)
+            else:
+                print(f"✓ Cached: {os.path.basename(path)}")
+
+        if secondary_tasks:
+            results = await asyncio.gather(*secondary_tasks)
+            for ok, path in zip(results, secondary_paths):
+                if not ok:
+                    print(f"⚠️ Secondary model file unavailable (non-fatal): {os.path.basename(path)}")
 
 
 class Prediction:
@@ -262,9 +282,17 @@ class Prediction:
             else:
                 raise ValueError("labels_v2.json must be a list or dict")
 
-        with open(SECONDARY_METADATA_PATH, "r", encoding="utf-8") as f:
-            self.secondary_metadata = json.load(f)
-            self.secondary_class_names = self.secondary_metadata["class_names"]
+        # Secondary metadata — optional
+        try:
+            with open(SECONDARY_METADATA_PATH, "r", encoding="utf-8") as f:
+                self.secondary_metadata = json.load(f)
+                self.secondary_class_names = self.secondary_metadata["class_names"]
+        except Exception as e:
+            print(f"⚠️ Secondary metadata unavailable (non-fatal): {e}")
+            self.secondary_metadata = None
+            self.secondary_class_names = None
+
+        providers = ["CPUExecutionProvider"]
 
         sess_opts = ort.SessionOptions()
         sess_opts.intra_op_num_threads = 1
@@ -273,7 +301,6 @@ class Prediction:
         sess_opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
         sess_opts.enable_mem_pattern = False
         sess_opts.enable_cpu_mem_arena = False
-        providers = ["CPUExecutionProvider"]
 
         self.primary_session = ort.InferenceSession(
             PRIMARY_ONNX_PATH,
@@ -282,21 +309,25 @@ class Prediction:
         )
         print(f"✅ Primary model initialized: {len(self.primary_class_names)} classes")
 
-        # Separate SessionOptions instance — ORT may mutate the object during init
-        sess_opts2 = ort.SessionOptions()
-        sess_opts2.intra_op_num_threads = 1
-        sess_opts2.inter_op_num_threads = 1
-        sess_opts2.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
-        sess_opts2.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-        sess_opts2.enable_mem_pattern = False
-        sess_opts2.enable_cpu_mem_arena = False
+        # Secondary model init — optional
+        try:
+            sess_opts2 = ort.SessionOptions()
+            sess_opts2.intra_op_num_threads = 1
+            sess_opts2.inter_op_num_threads = 1
+            sess_opts2.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+            sess_opts2.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+            sess_opts2.enable_mem_pattern = False
+            sess_opts2.enable_cpu_mem_arena = False
 
-        self.secondary_session = ort.InferenceSession(
-            SECONDARY_ONNX_PATH,
-            sess_options=sess_opts2,
-            providers=providers
-        )
-        print(f"✅ Secondary model initialized: {len(self.secondary_class_names)} classes")
+            self.secondary_session = ort.InferenceSession(
+                SECONDARY_ONNX_PATH,
+                sess_options=sess_opts2,
+                providers=providers
+            )
+            print(f"✅ Secondary model initialized: {len(self.secondary_class_names)} classes")
+        except Exception as e:
+            print(f"⚠️ Secondary model unavailable (non-fatal): {e}")
+            self.secondary_session = None
 
         self.models_initialized = True
         self.allow_auto_load = True
@@ -501,57 +532,71 @@ class Prediction:
         raw_bytes = await self._fetch_raw_bytes(url, session)
 
         try:
-            # Always kick off both inferences concurrently — if primary comes back
-            # >= 85% we use it immediately; otherwise secondary result is already done.
             loop = self._loop or asyncio.get_event_loop()
             primary_image = self._preprocess_from_bytes(raw_bytes, 224, 224)
-            sw = self.secondary_metadata["image_width"]
-            sh = self.secondary_metadata["image_height"]
-            secondary_image = self._preprocess_from_bytes(raw_bytes, sw, sh)
 
-            (primary_name, primary_prob), (secondary_name, secondary_prob) = await asyncio.gather(
-                loop.run_in_executor(None, self._run_inference, self.primary_session, primary_image, self.primary_class_names),
-                loop.run_in_executor(None, self._run_inference, self.secondary_session, secondary_image, self.secondary_class_names),
+            secondary_available = (
+                self.secondary_session is not None and
+                self.secondary_metadata is not None and
+                self.secondary_class_names is not None
             )
-            del primary_image, secondary_image
 
-            primary_confidence_pct   = primary_prob   * 100
-            secondary_confidence_pct = secondary_prob * 100
+            if secondary_available:
+                sw = self.secondary_metadata["image_width"]
+                sh = self.secondary_metadata["image_height"]
+                secondary_image = self._preprocess_from_bytes(raw_bytes, sw, sh)
 
-            # ── Pokemon-specific override ────────────────────────────────────
-            # If the primary model identified a Pokemon in the watch list,
-            # always pick whichever model had higher confidence — regardless
-            # of the normal threshold rules.
-            if primary_name in SECONDARY_MODEL_POKEMON:
-                if secondary_confidence_pct >= primary_confidence_pct:
-                    confidence = f"{secondary_confidence_pct:.2f}%"
-                    self.cache.set(cache_key, (secondary_name, confidence, "secondary_override"))
-                    self._maybe_gc()
-                    return secondary_name, confidence
-                else:
+                (primary_name, primary_prob), (secondary_name, secondary_prob) = await asyncio.gather(
+                    loop.run_in_executor(None, self._run_inference, self.primary_session, primary_image, self.primary_class_names),
+                    loop.run_in_executor(None, self._run_inference, self.secondary_session, secondary_image, self.secondary_class_names),
+                )
+                del primary_image, secondary_image
+
+                primary_confidence_pct   = primary_prob   * 100
+                secondary_confidence_pct = secondary_prob * 100
+
+                # ── Pokemon-specific override ────────────────────────────────────
+                if primary_name in SECONDARY_MODEL_POKEMON:
+                    if secondary_confidence_pct >= primary_confidence_pct:
+                        confidence = f"{secondary_confidence_pct:.2f}%"
+                        self.cache.set(cache_key, (secondary_name, confidence, "secondary_override"))
+                        self._maybe_gc()
+                        return secondary_name, confidence
+                    else:
+                        confidence = f"{primary_confidence_pct:.2f}%"
+                        self.cache.set(cache_key, (primary_name, confidence, "primary_override"))
+                        self._maybe_gc()
+                        return primary_name, confidence
+
+                # ── Normal threshold logic ───────────────────────────────────────
+                if primary_confidence_pct >= PRIMARY_CONFIDENCE_THRESHOLD:
                     confidence = f"{primary_confidence_pct:.2f}%"
-                    self.cache.set(cache_key, (primary_name, confidence, "primary_override"))
+                    self.cache.set(cache_key, (primary_name, confidence, "primary"))
                     self._maybe_gc()
                     return primary_name, confidence
 
-            # ── Normal threshold logic ───────────────────────────────────────
-            if primary_confidence_pct >= PRIMARY_CONFIDENCE_THRESHOLD:
+                if secondary_confidence_pct >= SECONDARY_CONFIDENCE_THRESHOLD:
+                    confidence = f"{secondary_confidence_pct:.2f}%"
+                    self.cache.set(cache_key, (secondary_name, confidence, "secondary"))
+                    self._maybe_gc()
+                    return secondary_name, confidence
+
+                # Both below threshold — fall back to primary
                 confidence = f"{primary_confidence_pct:.2f}%"
-                self.cache.set(cache_key, (primary_name, confidence, "primary"))
+                self.cache.set(cache_key, (primary_name, confidence, "primary_fallback"))
                 self._maybe_gc()
                 return primary_name, confidence
 
-            if secondary_confidence_pct >= SECONDARY_CONFIDENCE_THRESHOLD:
-                confidence = f"{secondary_confidence_pct:.2f}%"
-                self.cache.set(cache_key, (secondary_name, confidence, "secondary"))
+            else:
+                # Secondary unavailable — primary only
+                primary_name, primary_prob = await loop.run_in_executor(
+                    None, self._run_inference, self.primary_session, primary_image, self.primary_class_names
+                )
+                del primary_image
+                confidence = f"{primary_prob * 100:.2f}%"
+                self.cache.set(cache_key, (primary_name, confidence, "primary_only"))
                 self._maybe_gc()
-                return secondary_name, confidence
-
-            # Both models below threshold — fall back to primary result
-            confidence = f"{primary_confidence_pct:.2f}%"
-            self.cache.set(cache_key, (primary_name, confidence, "primary_fallback"))
-            self._maybe_gc()
-            return primary_name, confidence
+                return primary_name, confidence
 
         finally:
             # raw_bytes is the only large allocation; release it ASAP
