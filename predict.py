@@ -70,7 +70,7 @@ def _stable_cache_key(url: str) -> str:
 
 # GitHub raw content URLs for models
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
-PRIMARY_REPO_BASE   = "https://raw.githubusercontent.com/cynthiaofpower/myfinalmodel/main"
+PRIMARY_REPO_BASE   = "https://media.githubusercontent.com/media/cynthiaofpower/myfinalmodel/main"
 SECONDARY_REPO_BASE = "https://raw.githubusercontent.com/teamrocket43434/jessmodel/main"
 
 PRIMARY_ONNX_URL      = f"{PRIMARY_REPO_BASE}/myfinalmodel.onnx"
