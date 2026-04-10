@@ -1,8 +1,9 @@
 """Pokemon prediction using dual ONNX models"""
-import onnxruntime as ort
-import numpy as np
+# Heavy ML dependencies are intentionally NOT imported at module load time.
+# They are lazy-loaded in _ensure_heavy_imports() so that simply importing
+# this file (e.g. at bot startup) does not consume ~400 MB of RAM.
+# They are released again in unload_models() so RAM returns to startup baseline.
 import aiohttp
-from PIL import Image
 import io
 import os
 import json
@@ -12,6 +13,48 @@ import asyncio
 import gc
 import re
 from typing import Optional, Tuple
+
+# ---------------------------------------------------------------------------
+# Lazy-loaded heavy dependencies — populated by _ensure_heavy_imports()
+# ---------------------------------------------------------------------------
+ort   = None  # onnxruntime
+np    = None  # numpy
+Image = None  # PIL.Image
+
+
+def _ensure_heavy_imports():
+    """Import RAM-heavy libraries only when models are about to be loaded."""
+    global ort, np, Image
+    if ort is not None:
+        return  # already imported
+    import onnxruntime as _ort
+    import numpy as _np
+    from PIL import Image as _Image
+    ort   = _ort
+    np    = _np
+    Image = _Image
+
+
+def _release_heavy_imports():
+    """
+    Drop references to the heavy modules so Python can (partially) unload
+    their native memory.  onnxruntime's C++ allocator may keep a small pool,
+    but the bulk of session + model weights is freed by nullifying the sessions
+    before calling this.
+    """
+    global ort, np, Image
+    import sys
+    ort   = None
+    np    = None
+    Image = None
+    for mod_name in list(sys.modules.keys()):
+        if mod_name == 'onnxruntime' or mod_name.startswith('onnxruntime.'):
+            sys.modules.pop(mod_name, None)
+        elif mod_name == 'numpy' or mod_name.startswith('numpy.'):
+            sys.modules.pop(mod_name, None)
+        elif mod_name == 'PIL' or mod_name.startswith('PIL.'):
+            sys.modules.pop(mod_name, None)
+
 
 # Discord CDN URLs contain rotating query params (?ex=...&hm=...&is=...) that
 # change every message even for the same image file.  Strip them so the same
@@ -193,6 +236,9 @@ class Prediction:
             print("[INIT] Models already initialized, skipping...")
             return
 
+        # Import onnxruntime / numpy / Pillow NOW (not at module load time)
+        _ensure_heavy_imports()
+
         print("Initializing prediction models...")
         self._loop = asyncio.get_event_loop()
 
@@ -262,6 +308,11 @@ class Prediction:
 
         self.cache.cache.clear()
         self.cache.timestamps.clear()
+
+        # Release heavy native libraries so RAM returns to startup baseline.
+        # Must be called AFTER sessions are nullified (above) so ORT's own
+        # reference count drops to zero before we remove the module.
+        _release_heavy_imports()
 
         print("[UNLOAD] Model sessions and data cleared. Use !loadmodel to reload.")
         gc.collect()
