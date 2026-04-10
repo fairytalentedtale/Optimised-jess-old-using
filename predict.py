@@ -70,12 +70,15 @@ def _stable_cache_key(url: str) -> str:
 
 # GitHub raw content URLs for models
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
-PRIMARY_REPO_BASE   = "https://media.githubusercontent.com/media/cynthiaofpower/myfinalmodel/main"
+PRIMARY_REPO_RAW   = "https://raw.githubusercontent.com/cynthiaofpower/myfinalmodel/main"
+PRIMARY_REPO_LFS   = "https://media.githubusercontent.com/media/cynthiaofpower/myfinalmodel/main"
 SECONDARY_REPO_BASE = "https://raw.githubusercontent.com/teamrocket43434/jessmodel/main"
 
-PRIMARY_ONNX_URL      = f"{PRIMARY_REPO_BASE}/myfinalmodel.onnx"
-PRIMARY_ONNX_DATA_URL = f"{PRIMARY_REPO_BASE}/myfinalmodel.onnx.data"
-PRIMARY_LABELS_URL    = f"{PRIMARY_REPO_BASE}/labels.json"
+# .onnx and .data files are stored in Git LFS — must use media URL
+# .json files are plain text — use raw URL
+PRIMARY_ONNX_URL      = f"{PRIMARY_REPO_LFS}/myfinalmodel.onnx"
+PRIMARY_ONNX_DATA_URL = f"{PRIMARY_REPO_LFS}/myfinalmodel.onnx.data"
+PRIMARY_LABELS_URL    = f"{PRIMARY_REPO_RAW}/labels.json"
 SECONDARY_ONNX_URL      = f"{SECONDARY_REPO_BASE}/poketwo_pokemon_model.onnx"
 SECONDARY_ONNX_DATA_URL = f"{SECONDARY_REPO_BASE}/poketwo_pokemon_model.onnx.data"
 SECONDARY_METADATA_URL  = f"{SECONDARY_REPO_BASE}/model_metadata.json"
