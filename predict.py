@@ -72,7 +72,7 @@ def _stable_cache_key(url: str) -> str:
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 PRIMARY_REPO_RAW   = "https://raw.githubusercontent.com/cynthiaofpower/myfinalmodel/main"
 PRIMARY_REPO_LFS   = "https://media.githubusercontent.com/media/cynthiaofpower/myfinalmodel/main"
-SECONDARY_REPO_BASE = "https://raw.githubusercontent.com/teamrocket43434/jessmodel/main"
+SECONDARY_REPO_BASE = "https://raw.githubusercontent.com/cynthiaofpower/myfinalmodel/main"
 
 # .onnx and .data files are stored in Git LFS — must use media URL
 # .json files are plain text — use raw URL
