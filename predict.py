@@ -317,6 +317,16 @@ class Prediction:
         print("[UNLOAD] Model sessions and data cleared. Use !loadmodel to reload.")
         gc.collect()
 
+        # Tell glibc to release freed heap pages back to the OS immediately.
+        # Without this, Linux keeps the pages in the process address space and
+        # RSS stays high even though the memory is logically free.
+        import ctypes
+        try:
+            ctypes.CDLL("libc.so.6").malloc_trim(0)
+            print("[UNLOAD] malloc_trim called — heap returned to OS.")
+        except Exception as e:
+            print(f"[UNLOAD] malloc_trim unavailable: {e}")
+
     def _generate_cache_key(self, url: str) -> str:
         return _stable_cache_key(url)
 
