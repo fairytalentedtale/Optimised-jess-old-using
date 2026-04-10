@@ -2,7 +2,7 @@
 # Heavy ML dependencies are intentionally NOT imported at module load time.
 # They are lazy-loaded in _ensure_heavy_imports() so that simply importing
 # this file (e.g. at bot startup) does not consume ~400 MB of RAM.
-# They are released again in unload_models() so RAM returns to startup baseline.
+# They are released again in unload_models() so RAM returns to startup baseline .
 import aiohttp
 import io
 import os
